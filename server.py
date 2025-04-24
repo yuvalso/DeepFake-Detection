@@ -45,7 +45,8 @@ UPLOAD_FOLDER = 'Uploaded_Files'
 video_path = ""
 
 detectOutput = []
-
+features = []
+gradients = []
 app = Flask("__main__", template_folder="templates")
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
@@ -118,18 +119,57 @@ def im_convert(tensor):
   cv2.imwrite('./2.png', image*255)
   return image
 
-# For prediction of output  
-def predict(model, img, path='./'):
-  # use this command for gpu    
-  # fmap, logits = model(img.to('cuda'))
-  fmap, logits = model(img.to())
-  params = list(model.parameters())
-  weight_softmax = model.linear1.weight.detach().cpu().numpy()
-  logits = sm(logits)
-  _, prediction = torch.max(logits, 1)
-  confidence = logits[:, int(prediction.item())].item()*100
-  print('confidence of prediction: ', logits[:, int(prediction.item())].item()*100)
-  return [int(prediction.item()), confidence]
+# # For prediction of output  
+# def predict(model, img, path='./'):
+#   # use this command for gpu    
+#   # fmap, logits = model(img.to('cuda'))
+#   fmap, logits = model(img.to())
+#   params = list(model.parameters())
+#   weight_softmax = model.linear1.weight.detach().cpu().numpy()
+#   logits = sm(logits)
+#   _, prediction = torch.max(logits, 1)
+#   confidence = logits[:, int(prediction.item())].item()*100
+#   print('confidence of prediction: ', logits[:, int(prediction.item())].item()*100)
+#   return [int(prediction.item()), confidence]
+
+##################### green
+
+def predict(model, img, original_frame, path='./'):
+    fmap, logits = model(img)
+    logits = sm(logits)
+    _, prediction = torch.max(logits, 1)
+    confidence = logits[:, int(prediction.item())].item() * 100
+
+    # Backward pass to get gradients
+    model.zero_grad()
+    score = logits[:, prediction.item()]
+    score.backward(retain_graph=True)
+
+    # Generate CAM
+    cam = generate_cam(features[0].detach().cpu(), gradients[0].detach().cpu())
+
+    # Draw green rectangle(s) on the original frame
+    face_locations = face_recognition.face_locations(original_frame)
+    for (top, right, bottom, left) in face_locations:
+        cv2.rectangle(original_frame, (left, top), (right, bottom), (0, 255, 0), 2)  # Green rectangle
+
+    #  Resize the CAM heatmap to match the original frame size
+    cam = cv2.resize(cam, (original_frame.shape[1], original_frame.shape[0]))  # Width x Height
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+    heatmap = np.float32(heatmap) / 255
+
+    # Overlay the heatmap onto the original frame
+    overlay = heatmap + np.float32(original_frame) / 255
+    overlay = overlay / np.max(overlay)
+
+    #  Save the output image
+    output_path = os.path.join('Uploaded_Files', 'output_cam.png')
+    cv2.imwrite(output_path, np.uint8(255 * overlay))
+
+    print('confidence of prediction: ', confidence)
+    return [int(prediction.item()), confidence, output_path]
+
+###################### green !
 
 
 # To validate the dataset
@@ -197,10 +237,65 @@ def detectFakeVideo(videoPath, model_choice="default"):
     model = Model(2)
     model.load_state_dict(torch.load(path_to_model, map_location=torch.device('cpu')))
     model.eval()
+#################### green
+    # Choose your target CNN layer (replace 'model.7' if needed)
+    target_layer = model.model[-1]  # Example: last ResNeXt layer
+
+    def forward_hook(module, input, output):
+        features.append(output)
+
+    def backward_hook(module, grad_input, grad_output):
+        gradients.append(grad_output[0])
+
+    # Register the hooks
+    target_layer.register_forward_hook(forward_hook)
+    target_layer.register_backward_hook(backward_hook)
+
+################################## green !
 
     for i in range(len(path_to_videos)):
-        prediction = predict(model, video_dataset[i], './')
+        ##prediction = predict(model, video_dataset[i], './')
+        ###### green
+        # Extract one original frame for visualization
+        vidcap = cv2.VideoCapture(videoPath)
+        success, frame = vidcap.read()
+        vidcap.release()
+
+        prediction = predict(model, video_dataset[i], frame, './')
+        ###### green !
     return prediction
+
+
+################# green
+
+
+# def generate_cam(feature_map, gradients):
+#     weights = np.mean(gradients, axis=(2, 3))[0, :]  # Global average pooling
+#     cam = np.zeros(feature_map.shape[2:], dtype=np.float32)
+
+#     for i, w in enumerate(weights):
+#         cam += w * feature_map[0, i, :, :].detach().cpu().numpy()
+
+#     cam = np.maximum(cam, 0)
+#     cam = cv2.resize(cam, (112, 112))  # Match your frame size
+#     cam = cam - np.min(cam)
+#     cam = cam / np.max(cam)
+#     return cam
+
+def generate_cam(feature_map, gradients):
+    weights = gradients.mean(dim=(2, 3))[0, :]  # Use .mean from PyTorch
+    cam = torch.zeros(feature_map.shape[2:], dtype=torch.float32)
+
+    for i, w in enumerate(weights):
+        cam += w * feature_map[0, i, :, :].cpu()
+
+    cam = torch.relu(cam)
+    cam = cam.numpy()
+    cam = cv2.resize(cam, (112, 112))
+    cam = cam - np.min(cam)
+    cam = cam / np.max(cam)
+    return cam
+
 
 from flask import send_from_directory
 
@@ -215,6 +310,10 @@ def style():
 @app.route('/script.js')
 def script():
     return send_from_directory('frontend', 'script.js')
+
+@app.route('/Uploaded_Files/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
 @app.route('/Detect', methods=['POST', 'GET'])
@@ -245,7 +344,11 @@ def DetectPage():
         os.remove(video_path)
 
         # Send response
-        data = {'output': output, 'confidence': confidence}
+        #data = {'output': output, 'confidence': confidence}
+        ############# green
+        cam_image_path = '/' + prediction[2] # Relative path to the output image
+        data = {'output': output, 'confidence': confidence, 'cam_image': cam_image_path}
+        ############# green !
         return jsonify(data)
 
 
