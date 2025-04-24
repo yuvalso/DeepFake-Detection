@@ -148,21 +148,42 @@ def predict(model, img, original_frame, path='./'):
     # Generate CAM
     cam = generate_cam(features[0].detach().cpu(), gradients[0].detach().cpu())
 
-    # Draw green rectangle(s) on the original frame
+    # ✅ Safety check: Are faces detected?
     face_locations = face_recognition.face_locations(original_frame)
-    for (top, right, bottom, left) in face_locations:
-        cv2.rectangle(original_frame, (left, top), (right, bottom), (0, 255, 0), 2)  # Green rectangle
+    if not face_locations:
+        print("❌ No faces detected in the frame!")
+        output_path = os.path.join('Uploaded_Files', 'output_cam.png')
+        cv2.imwrite(output_path, original_frame)
+        return [int(prediction.item()), confidence, output_path]
 
-    #  Resize the CAM heatmap to match the original frame size
-    cam = cv2.resize(cam, (original_frame.shape[1], original_frame.shape[0]))  # Width x Height
+    # ✅ Draw rectangles on the detected faces
+    for (top, right, bottom, left) in face_locations:
+        cv2.rectangle(original_frame, (left, top), (right, bottom), (0, 255, 0), 2)
+
+    # ✅ Check if CAM was generated correctly
+    if cam is None or cam.size == 0:
+        print("⚠️ CAM heatmap was empty!")
+        output_path = os.path.join('Uploaded_Files', 'output_cam.png')
+        cv2.imwrite(output_path, original_frame)
+        return [int(prediction.item()), confidence, output_path]
+
+    # Resize CAM to match the frame size
+    cam = cv2.resize(cam, (original_frame.shape[1], original_frame.shape[0]))
     heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
     heatmap = np.float32(heatmap) / 255
 
-    # Overlay the heatmap onto the original frame
     overlay = heatmap + np.float32(original_frame) / 255
-    overlay = overlay / np.max(overlay)
+    max_value = np.max(overlay)
 
-    #  Save the output image
+    # ✅ Extra safety: Prevent division by zero
+    if max_value == 0:
+        print("⚠️ Overlay max value is zero — cannot normalize!")
+        output_path = os.path.join('Uploaded_Files', 'output_cam.png')
+        cv2.imwrite(output_path, original_frame)
+        return [int(prediction.item()), confidence, output_path]
+
+    overlay = overlay / max_value
+
     output_path = os.path.join('Uploaded_Files', 'output_cam.png')
     cv2.imwrite(output_path, np.uint8(255 * overlay))
 
